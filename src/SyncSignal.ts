@@ -20,6 +20,7 @@ export function createSyncSignal<T>(
   // Setup synchronization mechanisms
   const useBroadcast = typeof window !== "undefined" && "BroadcastChannel" in window;
   let channel: BroadcastChannel | null = null;
+  let channelClosed = false; // Track if channel has been closed
   let storageListener: ((event: StorageEvent) => void) | null = null;
   let pollingIntervalId: number | null = null;
   let throttleTimeout: number | null = null;
@@ -61,9 +62,20 @@ export function createSyncSignal<T>(
     try {
       const serializedData = serializeData(syncData); // Use serialization
 
-      // Use BroadcastChannel if available
-      if (channel) {
-        channel.postMessage(serializedData);
+      // Use BroadcastChannel if available and not closed
+      if (channel && !channelClosed) {
+        try {
+          channel.postMessage(serializedData);
+        } catch (error: any) {
+          // Handle closed channel error gracefully
+          if (error?.message?.includes("Channel is closed") || error?.name === "InvalidStateError") {
+            channelClosed = true;
+            channel = null;
+            // Continue with localStorage sync - don't throw
+          } else {
+            throw error; // Re-throw other errors
+          }
+        }
       }
       
       // Always save to localStorage for persistence (use syncsignal- prefix)
@@ -218,7 +230,15 @@ export function createSyncSignal<T>(
       clearTimeout(throttleTimeout);
       throttleTimeout = null;
     }
-    channel?.close();
+    if (channel) {
+      try {
+        channel.close();
+      } catch (error) {
+        // Ignore errors when closing channel
+      }
+      channelClosed = true;
+      channel = null;
+    }
     if (storageListener && typeof window !== "undefined") {
       window.removeEventListener("storage", storageListener);
     }

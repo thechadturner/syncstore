@@ -24,6 +24,7 @@ export function createSyncStore<T extends object>(options: SyncStoreOptions<T>) 
 
   // Setup synchronization mechanism
   let channel: BroadcastChannel | null = null;
+  let channelClosed = false; // Track if channel has been closed
   let storageListener: ((e: StorageEvent) => void) | null = null;
   let pollingInterval: number | null = null;
 
@@ -57,9 +58,20 @@ export function createSyncStore<T extends object>(options: SyncStoreOptions<T>) 
         localStorage.setItem(`syncstore-${key}`, payload);
       }
       
-      // Also broadcast if using BroadcastChannel
-      if (storageType === "broadcast" && typeof window !== "undefined" && "BroadcastChannel" in window) {
-        channel?.postMessage(payload);
+      // Also broadcast if using BroadcastChannel and not closed
+      if (storageType === "broadcast" && typeof window !== "undefined" && "BroadcastChannel" in window && channel && !channelClosed) {
+        try {
+          channel.postMessage(payload);
+        } catch (error: any) {
+          // Handle closed channel error gracefully
+          if (error?.message?.includes("Channel is closed") || error?.name === "InvalidStateError") {
+            channelClosed = true;
+            channel = null;
+            // Continue with localStorage sync - don't throw
+          } else {
+            throw error; // Re-throw other errors
+          }
+        }
       }
     } catch (error) {
       console.error("Failed to sync data:", error);
@@ -160,7 +172,15 @@ export function createSyncStore<T extends object>(options: SyncStoreOptions<T>) 
 
   // Cleanup function
   const cleanup = () => {
-    channel?.close();
+    if (channel) {
+      try {
+        channel.close();
+      } catch (error) {
+        // Ignore errors when closing channel
+      }
+      channelClosed = true;
+      channel = null;
+    }
     if (storageListener && typeof window !== "undefined") {
       window.removeEventListener("storage", storageListener);
     }
