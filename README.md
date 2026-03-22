@@ -10,6 +10,10 @@ npm install @solidjs/sync
 yarn add @solidjs/sync
 ```
 
+## Upgrading
+
+If you are on an older release, see **[MIGRATION.md](./MIGRATION.md)** for how to check your code and fix breaking or behavioural changes. Release notes are in **[CHANGELOG.md](./CHANGELOG.md)**.
+
 ## Features
 
 - Cross-tab state synchronization using BroadcastChannel API with localStorage fallback
@@ -110,6 +114,7 @@ function createSyncSignal<T>(
 
 **Options:**
 - `key` (required): Unique identifier for this synchronized value
+- `storageType`: `"broadcast"` (default) or `"localStorage"` — forces localStorage-based sync when set to `"localStorage"`
 - `autoSync`: Whether to sync automatically on changes (default: false)
 - `throttleMs`: Throttle time for auto sync in milliseconds (default: 50). Only applies when `autoSync` is true.
 - `pollingInterval`: Polling interval for fallback mode in milliseconds
@@ -130,14 +135,15 @@ function createSyncStore<T extends object>(options: SyncStoreOptions<T>): [
 **Options:**
 - `key` (required): Unique identifier for this synchronized store
 - `initialValue` (required): Initial store state
+- `storageType`: `"broadcast"` (default) or `"localStorage"`
 - `persistOnLoad`: Whether to persist initial state on load (default: true)
 - `pollingInterval`: Polling interval for fallback mode in milliseconds
 
 ### Utility Functions
 
 ```typescript
-// Get a sync function by key
-function getSync(key: string): (() => void) | undefined
+// Get a sync function by key (default type is "store"; use "signal" for createSyncSignal)
+function getSync(key: string, type?: "store" | "signal"): (() => void) | undefined
 
 // Clear stored data for a specific key (automatically triggers cleanup)
 function clearSyncData(key: string, type?: "store" | "signal"): void

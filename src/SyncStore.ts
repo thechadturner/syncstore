@@ -1,75 +1,71 @@
 import { createStore } from "solid-js/store";
-import { createSignal, onCleanup } from "solid-js";
-import { SyncStoreOptions, cleanupFunctions, syncFunctions } from "./types";
+import { createSignal, getOwner, onCleanup } from "solid-js";
+import {
+  SyncStoreOptions,
+  cleanupFunctions,
+  syncFunctions,
+  isValidSyncData,
+  serializeData,
+  deserializeData,
+} from "./types";
 
 /**
  * Creates a reactive store synchronized across browser tabs/windows.
- * Uses BroadcastChannel if available, otherwise falls back to localStorage polling.
+ * Uses BroadcastChannel if available, otherwise falls back to localStorage events.
  * @param options SyncStoreOptions<T>
  * @returns [store, setStore, sync] tuple
  */
 export function createSyncStore<T extends object>(options: SyncStoreOptions<T>) {
-  // Ensure options is defined
   if (!options) {
     throw new Error("SyncStore options are required");
   }
 
-  const { key, initialValue, storageType = "broadcast", persistOnLoad = true } = options;
+  const {
+    key,
+    initialValue,
+    storageType = "broadcast",
+    persistOnLoad = true,
+  } = options;
 
-  // Create the Solid store
+  const registryKey = `syncstore-${key}`;
+  const storageKey = `syncstore-${key}`;
+
   const [store, setStore] = createStore<T>(initialValue);
-
-  // Create a function to synchronize data
   const [lastUpdate, setLastUpdate] = createSignal<number>(Date.now());
 
-  // Setup synchronization mechanism
+  const useBroadcast =
+    storageType === "broadcast" &&
+    typeof window !== "undefined" &&
+    typeof window.BroadcastChannel === "function";
+
   let channel: BroadcastChannel | null = null;
-  let channelClosed = false; // Track if channel has been closed
+  let channelClosed = false;
   let storageListener: ((e: StorageEvent) => void) | null = null;
   let pollingInterval: number | null = null;
 
-  // Type guard for sync data
-  const isValidSyncData = (data: any): data is { data: T; timestamp: number } => {
-    return (
-      data &&
-      typeof data === "object" &&
-      "data" in data &&
-      "timestamp" in data &&
-      typeof data.timestamp === "number"
-    );
-  };
-
   /**
    * Synchronizes the current store state to other tabs/windows
-   * @returns {void}
    */
   const sync = () => {
     const timestamp = Date.now();
     setLastUpdate(timestamp);
 
-    const payload = JSON.stringify({
-      data: store,
-      timestamp
-    });
+    const payload = serializeData({ data: store, timestamp });
 
     try {
-      // Always save to localStorage for persistence
       if (typeof window !== "undefined" && window.localStorage) {
-        localStorage.setItem(`syncstore-${key}`, payload);
+        localStorage.setItem(storageKey, payload);
       }
-      
-      // Also broadcast if using BroadcastChannel and not closed
-      if (storageType === "broadcast" && typeof window !== "undefined" && "BroadcastChannel" in window && channel && !channelClosed) {
+
+      if (useBroadcast && channel && !channelClosed) {
         try {
           channel.postMessage(payload);
         } catch (error: any) {
-          // Handle closed channel error gracefully
           if (error?.message?.includes("Channel is closed") || error?.name === "InvalidStateError") {
             channelClosed = true;
             channel = null;
-            // Continue with localStorage sync - don't throw
           } else {
-            throw error; // Re-throw other errors
+            throw error;
           }
         }
       }
@@ -78,37 +74,35 @@ export function createSyncStore<T extends object>(options: SyncStoreOptions<T>) 
     }
   };
 
-  // Register the sync function
-  syncFunctions.set(key, sync);
+  // Register the sync function under namespaced key
+  syncFunctions.set(registryKey, sync);
 
-  // Check for existing data in localStorage
-  const loadExistingData = () => {
+  // Load persisted data from localStorage
+  const loadExistingData = (): boolean => {
     if (typeof window === "undefined" || !window.localStorage) return false;
     try {
-      const existingData = localStorage.getItem(`syncstore-${key}`);
+      const existingData = localStorage.getItem(storageKey);
       if (existingData) {
-        const parsedData = JSON.parse(existingData);
+        const parsedData = deserializeData(existingData);
         if (isValidSyncData(parsedData)) {
-          // Always load existing data regardless of timestamp on initial load
           setStore(() => parsedData.data);
           setLastUpdate(parsedData.timestamp);
-          return true; // Indicate that data was loaded
+          return true;
         }
       }
     } catch (error) {
       console.error("Failed to load existing data:", error);
     }
-    return false; // Indicate that no data was loaded
+    return false;
   };
 
-  // Initialize synchronization
-  if (storageType === "broadcast" && typeof window !== "undefined" && "BroadcastChannel" in window) {
-    // Use BroadcastChannel API
-    channel = new BroadcastChannel(`syncstore-${key}`);
+  // Set up transport
+  if (useBroadcast) {
+    channel = new BroadcastChannel(storageKey);
 
     channel.onmessage = (event) => {
       try {
-        const parsedData = JSON.parse(event.data);
+        const parsedData = deserializeData(event.data);
         if (isValidSyncData(parsedData) && parsedData.timestamp > lastUpdate()) {
           setStore(() => parsedData.data);
           setLastUpdate(parsedData.timestamp);
@@ -117,14 +111,12 @@ export function createSyncStore<T extends object>(options: SyncStoreOptions<T>) 
         console.error("Failed to parse sync message:", error);
       }
     };
-
-    // Don't call loadExistingData here - it will be called below
   } else if (typeof window !== "undefined") {
-    // Fallback to localStorage polling
+    // Fallback: storage event
     storageListener = (event) => {
-      if (event.key === `syncstore-${key}` && event.newValue) {
+      if (event.key === storageKey && event.newValue) {
         try {
-          const parsedData = JSON.parse(event.newValue);
+          const parsedData = deserializeData(event.newValue);
           if (isValidSyncData(parsedData) && parsedData.timestamp > lastUpdate()) {
             setStore(() => parsedData.data);
             setLastUpdate(parsedData.timestamp);
@@ -137,16 +129,16 @@ export function createSyncStore<T extends object>(options: SyncStoreOptions<T>) 
 
     window.addEventListener("storage", storageListener);
 
-    // Optional: Poll for changes
+    // Optional polling
     if (options.pollingInterval) {
-      let lastData = window.localStorage ? localStorage.getItem(`syncstore-${key}`) : null;
+      let lastData = window.localStorage ? localStorage.getItem(storageKey) : null;
 
       pollingInterval = window.setInterval(() => {
         try {
-          const newData = window.localStorage ? localStorage.getItem(`syncstore-${key}`) : null;
+          const newData = window.localStorage ? localStorage.getItem(storageKey) : null;
 
           if (newData !== lastData && newData) {
-            const parsedData = JSON.parse(newData);
+            const parsedData = deserializeData(newData);
             if (isValidSyncData(parsedData) && parsedData.timestamp > lastUpdate()) {
               setStore(() => parsedData.data);
               setLastUpdate(parsedData.timestamp);
@@ -160,23 +152,20 @@ export function createSyncStore<T extends object>(options: SyncStoreOptions<T>) 
     }
   }
 
-  // Initialize storage with current value - moved outside the if/else blocks
   if (persistOnLoad) {
-    const dataLoaded = loadExistingData(); // Attempt to load existing data
+    const dataLoaded = loadExistingData();
     if (!dataLoaded) {
-      // Only sync if no existing data was loaded (first time)
       sync();
     }
-    // If data was loaded, don't sync to avoid overwriting
   }
 
-  // Cleanup function
+  // Cleanup
   const cleanup = () => {
     if (channel) {
       try {
         channel.close();
-      } catch (error) {
-        // Ignore errors when closing channel
+      } catch {
+        // ignore errors on close
       }
       channelClosed = true;
       channel = null;
@@ -187,15 +176,16 @@ export function createSyncStore<T extends object>(options: SyncStoreOptions<T>) 
     if (pollingInterval !== null) {
       window.clearInterval(pollingInterval);
     }
-    syncFunctions.delete(key);
-    cleanupFunctions.delete(key);
+    syncFunctions.delete(registryKey);
+    cleanupFunctions.delete(registryKey);
   };
 
-  // Register cleanup function in global registry
-  cleanupFunctions.set(key, cleanup);
+  cleanupFunctions.set(registryKey, cleanup);
 
-  // Use onCleanup for automatic cleanup when in reactive context
-  onCleanup(cleanup);
+  // Only register onCleanup when inside a reactive owner (component/effect)
+  if (getOwner()) {
+    onCleanup(cleanup);
+  }
 
   return [store, setStore, sync] as const;
 }

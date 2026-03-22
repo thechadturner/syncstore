@@ -1,0 +1,56 @@
+.app-container {
+  font-family: system-ui, sans-serif;
+  padding: 2rem;
+}
+
+.panels {
+  display: flex;
+  gap: 2rem;
+}
+
+.panel {
+  border: 1px solid #ccc;
+  padding: 1rem;
+  border-radius: 0.5rem;
+  width: 50%;
+}
+
+.panel-toggle {
+  margin-bottom: 1rem;
+}
+
+.count-display {
+  font-size: 1.25rem;
+  font-weight: bold;
+  margin-bottom: 0.75rem;
+}
+
+.button-row {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.message-display {
+  background: #eee;
+  padding: 1rem;
+  border-radius: 0.25rem;
+  margin-bottom: 0.75rem;
+  min-height: 2.5rem;
+  word-break: break-word;
+}
+
+.message-input {
+  width: 100%;
+  padding: 0.5rem;
+  margin-bottom: 0.5rem;
+  box-sizing: border-box;
+  font-size: 1rem;
+  border: 1px solid #ccc;
+  border-radius: 0.25rem;
+}
+
+.instructions {
+  margin-top: 2rem;
+  color: #555;
+}

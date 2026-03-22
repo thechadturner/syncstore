@@ -1,10 +1,9 @@
-import { createSignal, onCleanup } from "solid-js";
-import { SyncOptions } from "./types";
-import { syncFunctions, cleanupFunctions } from "./types";
+import { createSignal, getOwner, onCleanup } from "solid-js";
+import { SyncOptions, syncFunctions, cleanupFunctions, isValidSyncData, serializeData, deserializeData } from "./types";
 
 /**
  * Creates a reactive signal synchronized across browser tabs/windows.
- * @param initialValue Initial value of the signal (can be any basic type: string, number, boolean, null, undefined)
+ * @param initialValue Initial value of the signal
  * @param options Synchronization options
  * @returns [value, setValue, sync] tuple
  */
@@ -12,75 +11,59 @@ export function createSyncSignal<T>(
   initialValue: T,
   options: SyncOptions<T>
 ) {
-  const { key, throttleMs = 50, autoSync = false, pollingInterval, persistOnLoad = true } = options;
+  const {
+    key,
+    throttleMs = 50,
+    autoSync = false,
+    pollingInterval,
+    persistOnLoad = true,
+    storageType = "broadcast",
+  } = options;
+
+  const registryKey = `syncsignal-${key}`;
+  const storageKey = `syncsignal-${key}`;
+
   const [value, _setValue] = createSignal<T>(initialValue);
   let setValue = _setValue;
   const [lastUpdate, setLastUpdate] = createSignal<number>(Date.now());
-  
-  // Setup synchronization mechanisms
-  const useBroadcast = typeof window !== "undefined" && "BroadcastChannel" in window;
+
+  const useBroadcast =
+    storageType === "broadcast" &&
+    typeof window !== "undefined" &&
+    typeof window.BroadcastChannel === "function";
+
   let channel: BroadcastChannel | null = null;
-  let channelClosed = false; // Track if channel has been closed
+  let channelClosed = false;
   let storageListener: ((event: StorageEvent) => void) | null = null;
   let pollingIntervalId: number | null = null;
   let throttleTimeout: number | null = null;
 
-  // Helper function to serialize data, converting Date objects to strings
-  const serializeData = (data: any) => {
-    return JSON.stringify(data, (key, value) => {
-      if (value instanceof Date) {
-        return { __type: "Date", value: value.toISOString() };
-      }
-      return value;
-    });
-  };
-
-  // Helper function to deserialize data, converting strings back to Date objects
-  const deserializeData = (data: string) => {
-    return JSON.parse(data, (key, value) => {
-      if (value && value.__type === "Date") {
-        try {
-          return new Date(value.value);
-        } catch (error) {
-          console.error(`Failed to deserialize Date for key "${key}":`, error);
-          return `Invalid Date: ${value.value}`; // Return a string indicating the error
-        }
-      }
-      return value;
-    });
-  };
-
-  // Synchronize data to other tabs/windows
+  // Synchronize current value to other tabs/windows
   const sync = () => {
     const currentValue = value();
     const syncData = {
       timestamp: Date.now(),
       data: currentValue,
-      type: typeof currentValue
     };
-    
-    try {
-      const serializedData = serializeData(syncData); // Use serialization
 
-      // Use BroadcastChannel if available and not closed
+    try {
+      const serializedData = serializeData(syncData);
+
       if (channel && !channelClosed) {
         try {
           channel.postMessage(serializedData);
         } catch (error: any) {
-          // Handle closed channel error gracefully
           if (error?.message?.includes("Channel is closed") || error?.name === "InvalidStateError") {
             channelClosed = true;
             channel = null;
-            // Continue with localStorage sync - don't throw
           } else {
-            throw error; // Re-throw other errors
+            throw error;
           }
         }
       }
-      
-      // Always save to localStorage for persistence (use syncsignal- prefix)
+
       if (typeof window !== "undefined" && window.localStorage) {
-        localStorage.setItem(`syncsignal-${key}`, serializedData);
+        localStorage.setItem(storageKey, serializedData);
       }
       setLastUpdate(syncData.timestamp);
     } catch (error) {
@@ -88,39 +71,34 @@ export function createSyncSignal<T>(
     }
   };
 
-  // Load existing data from storage if available
-  const loadExistingData = () => {
+  // Load persisted data from localStorage
+  const loadExistingData = (): boolean => {
     if (typeof window === "undefined" || !window.localStorage) return false;
     try {
-      const storedData = localStorage.getItem(`syncsignal-${key}`);
+      const storedData = localStorage.getItem(storageKey);
       if (storedData) {
-        const parsedData = deserializeData(storedData); // Use deserialization
+        const parsedData = deserializeData(storedData);
         if (parsedData && isValidSyncData(parsedData)) {
-          // Always load existing data regardless of timestamp on initial load
-          setValue(() => parsedData.data); // Set the value from storage
+          setValue(() => parsedData.data);
           setLastUpdate(parsedData.timestamp);
-          return true; // Indicate that data was loaded
+          return true;
         }
       }
     } catch (error) {
       console.error("Failed to load existing data:", error);
     }
-    return false; // Indicate that no data was loaded
+    return false;
   };
-  
-  // Register the sync function
-  if (typeof syncFunctions !== 'undefined') {
-    syncFunctions.set(key, sync);
-  } else {
-    console.warn("syncFunctions map not available, sync function won't be retrievable with getSync");
-  }
-  
-  // Set up BroadcastChannel for cross-tab communication
-  if (useBroadcast && typeof window !== "undefined") {
-    channel = new BroadcastChannel(`syncsignal-${key}`);
+
+  // Register sync function under namespaced key
+  syncFunctions.set(registryKey, sync);
+
+  // Set up transport
+  if (useBroadcast) {
+    channel = new BroadcastChannel(storageKey);
     channel.onmessage = (event) => {
       try {
-        const parsedData = deserializeData(event.data); // Use deserialization
+        const parsedData = deserializeData(event.data);
         if (parsedData && isValidSyncData(parsedData) && parsedData.timestamp > lastUpdate()) {
           setValue(() => parsedData.data);
           setLastUpdate(parsedData.timestamp);
@@ -129,15 +107,13 @@ export function createSyncSignal<T>(
         console.error("Failed to parse sync message:", error);
       }
     };
-    
-    loadExistingData();
   } else if (typeof window !== "undefined") {
-    // Fallback to localStorage polling
+    // Fallback: storage event
     storageListener = (event) => {
-      if (event.key === `syncsignal-${key}` && event.newValue) {
+      if (event.key === storageKey && event.newValue) {
         try {
-          const parsedData = deserializeData(event.newValue); // Use deserialization
-          if (parsedData && parsedData.timestamp > lastUpdate()) {
+          const parsedData = deserializeData(event.newValue);
+          if (parsedData && isValidSyncData(parsedData) && parsedData.timestamp > lastUpdate()) {
             setValue(() => parsedData.data as T);
             setLastUpdate(parsedData.timestamp);
           }
@@ -146,24 +122,19 @@ export function createSyncSignal<T>(
         }
       }
     };
-    
+
     window.addEventListener("storage", storageListener);
-    loadExistingData();
-    
-    // Optional: Poll for changes
+
+    // Optional polling
     if (pollingInterval) {
-      let lastData = typeof window !== "undefined" && window.localStorage 
-        ? localStorage.getItem(`syncsignal-${key}`) 
-        : null;
-      
+      let lastData = window.localStorage ? localStorage.getItem(storageKey) : null;
+
       pollingIntervalId = window.setInterval(() => {
         try {
-          const newData = typeof window !== "undefined" && window.localStorage
-            ? localStorage.getItem(`syncsignal-${key}`)
-            : null;
+          const newData = window.localStorage ? localStorage.getItem(storageKey) : null;
           if (newData !== lastData && newData) {
-            const parsedData = deserializeData(newData); // Ensure deserialization
-            if (parsedData && parsedData.timestamp > lastUpdate()) {
+            const parsedData = deserializeData(newData);
+            if (parsedData && isValidSyncData(parsedData) && parsedData.timestamp > lastUpdate()) {
               setValue(() => parsedData.data);
               setLastUpdate(parsedData.timestamp);
             }
@@ -176,17 +147,15 @@ export function createSyncSignal<T>(
     }
   }
 
-  // Initialize storage with current value
+  // Persist on load
   if (persistOnLoad) {
-    const dataLoaded = loadExistingData(); // Attempt to load existing data
+    const dataLoaded = loadExistingData();
     if (!dataLoaded) {
-      // Only sync if no existing data was loaded (first time)
       sync();
     }
-    // If data was loaded, don't sync to avoid overwriting
   }
-  
-  // Set up auto sync if enabled with throttling
+
+  // Auto sync: wrap setValue with throttled sync
   let lastValueStr = JSON.stringify(initialValue);
   if (autoSync) {
     const originalSetValue = setValue;
@@ -200,31 +169,24 @@ export function createSyncSignal<T>(
           throttleTimeout = null;
         }, throttleMs);
       } else {
-        // Fallback for SSR - sync immediately
         sync();
       }
     };
-    
+
     const wrappedSetValue = (next: Exclude<T, Function> | ((prev: T) => T)) => {
       const result = originalSetValue(next);
-      
-      // After value changes, check if we need to sync
-      const currentValue = value();
-      const currentValueStr = JSON.stringify(currentValue);
-      
+      const currentValueStr = JSON.stringify(value());
       if (currentValueStr !== lastValueStr) {
         lastValueStr = currentValueStr;
-        throttledSync(); // Use throttled sync instead of direct sync
+        throttledSync();
       }
-      
       return result;
     };
-    
-    // Replace setValue with our wrapped version
+
     setValue = wrappedSetValue as typeof setValue;
   }
-  
-  // Cleanup function
+
+  // Cleanup
   const cleanup = () => {
     if (throttleTimeout !== null) {
       clearTimeout(throttleTimeout);
@@ -233,8 +195,8 @@ export function createSyncSignal<T>(
     if (channel) {
       try {
         channel.close();
-      } catch (error) {
-        // Ignore errors when closing channel
+      } catch {
+        // ignore errors on close
       }
       channelClosed = true;
       channel = null;
@@ -245,27 +207,16 @@ export function createSyncSignal<T>(
     if (pollingIntervalId !== null) {
       window.clearInterval(pollingIntervalId);
     }
-    syncFunctions.delete(key);
-    cleanupFunctions.delete(key);
+    syncFunctions.delete(registryKey);
+    cleanupFunctions.delete(registryKey);
   };
 
-  // Register cleanup function in global registry
-  cleanupFunctions.set(key, cleanup);
+  cleanupFunctions.set(registryKey, cleanup);
 
-  // Use onCleanup for automatic cleanup when in reactive context
-  onCleanup(cleanup);
+  // Only register onCleanup when inside a reactive owner (component/effect)
+  if (getOwner()) {
+    onCleanup(cleanup);
+  }
 
-  // Return the value, setter, and sync function (no cleanup in return)
   return [value, setValue, sync] as const;
 }
-
-// Global type guard to validate sync data structure
-export const isValidSyncData = (data: any): data is { data: any; timestamp: number; type?: string } => {
-  return (
-    data &&
-    typeof data === "object" &&
-    "data" in data &&
-    "timestamp" in data &&
-    typeof data.timestamp === "number"
-  );
-};
